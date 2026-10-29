@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ type ACPAgent struct {
 	cwd          string
 	env          map[string]string
 	protocol     string // "legacy_acp" or "codex_app_server"
+	imagePrompt  bool   // agent advertised promptCapabilities.image during initialize
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -114,8 +116,18 @@ type promptParams struct {
 }
 
 type promptEntry struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`     // base64 (image)
+	MIMEType string `json:"mimeType,omitempty"` // image
+}
+
+type initResult struct {
+	AgentCapabilities struct {
+		PromptCapabilities struct {
+			Image bool `json:"image"`
+		} `json:"promptCapabilities"`
+	} `json:"agentCapabilities"`
 }
 
 type promptResult struct {
@@ -306,6 +318,12 @@ func (a *ACPAgent) Start(ctx context.Context) error {
 	}
 
 	log.Printf("[acp] initialized (pid=%d): %s", pid, string(result))
+	if a.protocol == protocolLegacyACP {
+		var init initResult
+		if json.Unmarshal(result, &init) == nil {
+			a.imagePrompt = init.AgentCapabilities.PromptCapabilities.Image
+		}
+	}
 	return nil
 }
 
@@ -360,6 +378,13 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 
 // Chat sends a message and returns the full response.
 func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.ChatWithAttachments(ctx, conversationID, message, nil)
+}
+
+// ChatWithAttachments sends a message plus local attachments. Images are sent as
+// ACP image content blocks when the agent supports them; otherwise their paths
+// are appended to the text.
+func (a *ACPAgent) ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error) {
 	if !a.started {
 		if err := a.Start(ctx); err != nil {
 			return "", err
@@ -368,7 +393,12 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 
 	// Route to codex app-server protocol if applicable
 	if a.protocol == protocolCodexAppServer {
-		return a.chatCodexAppServer(ctx, conversationID, message)
+		return a.chatCodexAppServer(ctx, conversationID, MessageWithAttachmentPaths(message, attachments))
+	}
+
+	prompt, err := buildPromptEntries(message, attachments, a.imagePrompt)
+	if err != nil {
+		return "", err
 	}
 
 	// Get or create session
@@ -405,7 +435,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 	go func() {
 		result, err := a.rpc(ctx, "session/prompt", promptParams{
 			SessionID: sessionID,
-			Prompt:    []promptEntry{{Type: "text", Text: message}},
+			Prompt:    prompt,
 		})
 		if result != nil {
 			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
@@ -1053,4 +1083,28 @@ func (w *acpStderrWriter) LastError() string {
 	s := w.last
 	w.last = ""
 	return s
+}
+
+// buildPromptEntries builds the session/prompt content. Image attachments become
+// base64 image blocks when imageSupported; anything else is referenced by path.
+func buildPromptEntries(message string, attachments []Attachment, imageSupported bool) ([]promptEntry, error) {
+	var images []promptEntry
+	var others []Attachment
+	for _, att := range attachments {
+		if !imageSupported || !strings.HasPrefix(att.MIMEType, "image/") {
+			others = append(others, att)
+			continue
+		}
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			return nil, fmt.Errorf("read attachment: %w", err)
+		}
+		images = append(images, promptEntry{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(data),
+			MIMEType: att.MIMEType,
+		})
+	}
+	text := promptEntry{Type: "text", Text: MessageWithAttachmentPaths(message, others)}
+	return append([]promptEntry{text}, images...), nil
 }

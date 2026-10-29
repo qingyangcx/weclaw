@@ -93,3 +93,31 @@ type Agent interface {
 	// SetCwd changes the working directory for subsequent operations.
 	SetCwd(cwd string)
 }
+
+// Attachment is a local file (e.g. an inbound WeChat image) sent along with a message.
+type Attachment struct {
+	Path     string // absolute local path
+	MIMEType string // e.g. "image/png"
+}
+
+// AttachmentChatAgent is implemented by agents that can receive attachments
+// natively. Agents that don't implement it get the paths via MessageWithAttachmentPaths.
+type AttachmentChatAgent interface {
+	ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error)
+}
+
+// MessageWithAttachmentPaths appends local attachment paths to message so that
+// text-only agents can open the files themselves.
+func MessageWithAttachmentPaths(message string, attachments []Attachment) string {
+	if len(attachments) == 0 {
+		return message
+	}
+	var b strings.Builder
+	b.WriteString(message)
+	b.WriteString("\n\nAttached file(s):")
+	for _, att := range attachments {
+		b.WriteString("\n- ")
+		b.WriteString(att.Path)
+	}
+	return b.String()
+}
