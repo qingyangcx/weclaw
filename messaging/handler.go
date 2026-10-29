@@ -2,8 +2,10 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/alert"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/google/uuid"
 )
@@ -294,7 +297,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		if err != nil {
 			log.Printf("[handler] failed to save image from %s: %v", msg.FromUserID, err)
 			reply := fmt.Sprintf("Failed to save image: %v", err)
-			_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID())
+			h.sendReply(ctx, client, msg, "", reply, NewClientID())
 			return
 		}
 		if text == "" {
@@ -329,9 +332,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			} else {
 				reply = fmt.Sprintf("已保存: %s", title)
 			}
-			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-			}
+			h.sendReply(ctx, client, msg, "", reply, clientID)
 			return
 		}
 	}
@@ -339,27 +340,19 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Built-in commands (no typing needed)
 	if trimmed == "/info" {
 		reply := h.buildStatus()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
+		h.sendReply(ctx, client, msg, "", reply, clientID)
 		return
 	} else if trimmed == "/help" {
 		reply := buildHelpText()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
+		h.sendReply(ctx, client, msg, "", reply, clientID)
 		return
 	} else if trimmed == "/new" || trimmed == "/clear" {
 		reply := h.resetDefaultSession(ctx, msg.FromUserID)
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
+		h.sendReply(ctx, client, msg, "", reply, clientID)
 		return
 	} else if strings.HasPrefix(trimmed, "/cwd") {
 		reply := h.handleCwd(trimmed)
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
+		h.sendReply(ctx, client, msg, "", reply, clientID)
 		return
 	}
 
@@ -379,17 +372,13 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	if message == "" {
 		if len(agentNames) == 1 && h.isKnownAgent(agentNames[0]) {
 			reply := h.switchDefault(ctx, agentNames[0])
-			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-			}
+			h.sendReply(ctx, client, msg, "", reply, clientID)
 		} else if len(agentNames) == 1 && !h.isKnownAgent(agentNames[0]) {
 			// Unknown agent -> forward to default
 			h.sendToDefaultAgent(ctx, client, msg, text, attachments, clientID)
 		} else {
 			reply := "Usage: specify one agent to switch, or add a message to broadcast"
-			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-			}
+			h.sendReply(ctx, client, msg, "", reply, clientID)
 		}
 		return
 	}
@@ -439,7 +428,7 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 	var reply string
 	if ag != nil {
 		var err error
-		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text, attachments)
+		reply, err = h.chatWithAgent(ctx, ag, client.BotID(), msg.FromUserID, text, attachments)
 		if err != nil {
 			reply = fmt.Sprintf("Error: %v", err)
 		}
@@ -457,11 +446,11 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 	if agErr != nil {
 		log.Printf("[handler] agent %q not available: %v", name, agErr)
 		reply := fmt.Sprintf("Agent %q is not available: %v", name, agErr)
-		SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		h.sendReply(ctx, client, msg, name, reply, clientID)
 		return
 	}
 
-	reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message, attachments)
+	reply, err := h.chatWithAgent(ctx, ag, client.BotID(), msg.FromUserID, message, attachments)
 	if err != nil {
 		reply = fmt.Sprintf("Error: %v", err)
 	}
@@ -485,7 +474,7 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
 			}
-			reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message, attachments)
+			reply, err := h.chatWithAgent(ctx, ag, client.BotID(), msg.FromUserID, message, attachments)
 			if err != nil {
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
@@ -527,14 +516,31 @@ func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, 
 
 	reply = rewriteReplyWithAttachmentResults(reply, sentPaths, failedPaths)
 
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-	}
+	h.sendReply(ctx, client, msg, agentName, reply, clientID)
 
 	for _, imgURL := range imageURLs {
 		if err := SendMediaFromURL(ctx, client, msg.FromUserID, imgURL, msg.ContextToken); err != nil {
 			log.Printf("[handler] failed to send image to %s: %v", msg.FromUserID, err)
 		}
+	}
+}
+
+// sendReply sends a text reply to the message sender, logging and alerting on failure.
+func (h *Handler) sendReply(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, agentName, reply, clientID string) {
+	err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+	if err == nil {
+		return
+	}
+	log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	if ctx.Err() == nil { // not shutting down
+		alert.Notify(alert.Alert{
+			Kind:    alert.KindReplyFailed,
+			Summary: "failed to send reply to WeChat",
+			Account: client.BotID(),
+			UserID:  msg.FromUserID,
+			Agent:   agentName,
+			Err:     err.Error(),
+		})
 	}
 }
 
@@ -554,7 +560,7 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 
 // chatWithAgent sends a message (plus optional attachments) to an agent and returns the reply, with logging.
 // Agents without native attachment support receive the attachment paths in the message text.
-func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string, attachments []agent.Attachment) (string, error) {
+func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, account, userID, message string, attachments []agent.Attachment) (string, error) {
 	info := ag.Info()
 	log.Printf("[handler] dispatching to agent (%s) for %s (attachments=%d)", info, userID, len(attachments))
 
@@ -570,11 +576,30 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	if err != nil {
 		log.Printf("[handler] agent error (%s, elapsed=%s): %v", info, elapsed, err)
+		if ctx.Err() == nil { // not shutting down
+			kind := alert.KindAgentError
+			if isTimeout(err) {
+				kind = alert.KindAgentTimeout
+			}
+			alert.Notify(alert.Alert{
+				Kind:    kind,
+				Summary: fmt.Sprintf("%s: %v", info.Name, err),
+				Account: account,
+				UserID:  userID,
+				Agent:   info.Name,
+				Err:     fmt.Sprintf("%v (elapsed %s)", err, elapsed.Round(time.Millisecond)),
+			})
+		}
 		return "", err
 	}
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
 	return reply, nil
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 // switchDefault switches the default agent. Starts it on demand if needed.

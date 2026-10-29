@@ -65,7 +65,7 @@ func TestChatWithAgent_Attachments(t *testing.T) {
 	atts := []agent.Attachment{{Path: "/tmp/x.jpg", MIMEType: "image/jpeg"}}
 
 	textAg := &textOnlyAgent{}
-	if _, err := h.chatWithAgent(context.Background(), textAg, "u", "what is this", atts); err != nil {
+	if _, err := h.chatWithAgent(context.Background(), textAg, "bot", "u", "what is this", atts); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(textAg.got, "what is this") || !strings.Contains(textAg.got, "/tmp/x.jpg") {
@@ -73,7 +73,7 @@ func TestChatWithAgent_Attachments(t *testing.T) {
 	}
 
 	attAg := &attachmentAgent{}
-	if _, err := h.chatWithAgent(context.Background(), attAg, "u", "what is this", atts); err != nil {
+	if _, err := h.chatWithAgent(context.Background(), attAg, "bot", "u", "what is this", atts); err != nil {
 		t.Fatal(err)
 	}
 	if attAg.got != "what is this" || len(attAg.atts) != 1 {

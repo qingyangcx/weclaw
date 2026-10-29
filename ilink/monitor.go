@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/fastclaw-ai/weclaw/alert"
 )
 
 const (
@@ -74,6 +76,12 @@ func (m *Monitor) Run(ctx context.Context) error {
 				m.failures, maxConsecutiveFailures, backoff, err)
 			if m.failures == maxConsecutiveFailures {
 				log.Printf("[monitor] WARNING: %d consecutive failures. If this persists, run `weclaw login` to re-authenticate.", maxConsecutiveFailures)
+				alert.Notify(alert.Alert{
+					Kind:    alert.KindPollFailing,
+					Summary: fmt.Sprintf("%d consecutive GetUpdates failures", maxConsecutiveFailures),
+					Account: m.client.BotID(),
+					Err:     err.Error(),
+				})
 			}
 			select {
 			case <-time.After(backoff):
@@ -97,6 +105,12 @@ func (m *Monitor) Run(ctx context.Context) error {
 				// Sync buf already empty but still getting session expired:
 				// the bot token itself has expired. The user needs to re-login.
 				log.Printf("[monitor] WARNING: WeChat session expired and cannot be auto-recovered. Run `weclaw login` to re-authenticate.")
+				alert.Notify(alert.Alert{
+					Kind:    alert.KindSessionExpired,
+					Summary: "account offline, run `weclaw login`",
+					Account: m.client.BotID(),
+					Err:     "WeChat session expired and cannot be auto-recovered; run `weclaw login` to re-authenticate",
+				})
 			}
 			select {
 			case <-time.After(sessionExpiredBackoff):
@@ -120,7 +134,10 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 		// Process messages concurrently — don't block the poll loop
 		for _, msg := range resp.Msgs {
-			go m.handler(ctx, m.client, msg)
+			go func() {
+				defer alert.CrashOnPanic()
+				m.handler(ctx, m.client, msg)
+			}()
 		}
 	}
 }

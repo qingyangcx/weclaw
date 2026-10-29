@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -115,5 +116,79 @@ func TestLoadEnvOverridesTopLevelOnly(t *testing.T) {
 	}
 	if got := cfg.Agents["claude"].Env["KEEP"]; got != "value" {
 		t.Fatalf("agent env = %q, want preserved value", got)
+	}
+}
+
+func TestEmailAlertAbsent(t *testing.T) {
+	cfg := DefaultConfig()
+	got, err := cfg.EmailAlert()
+	if err != nil || got != nil {
+		t.Fatalf("EmailAlert() = %+v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestEmailAlertFromJSONWithEnvOverrides(t *testing.T) {
+	var cfg Config
+	data := []byte(`{
+		"alert": {
+			"email": {
+				"enabled": true,
+				"smtp_host": "smtp.example.com",
+				"username": "bot@example.com",
+				"password": "from-file",
+				"to": ["ops@example.com"]
+			}
+		}
+	}`)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	t.Setenv("WECLAW_ALERT_SMTP_PASSWORD", "from-env")
+	t.Setenv("WECLAW_ALERT_SMTP_PORT", "465")
+	t.Setenv("WECLAW_ALERT_TO", "a@example.com, b@example.com")
+
+	got, err := cfg.EmailAlert()
+	if err != nil {
+		t.Fatalf("EmailAlert: %v", err)
+	}
+	if got.SMTPHost != "smtp.example.com" || got.SMTPPort != 465 || got.Password != "from-env" ||
+		got.From != "bot@example.com" || strings.Join(got.To, ",") != "a@example.com,b@example.com" {
+		t.Fatalf("unexpected config: %+v", got)
+	}
+	// Env overrides must not leak into the saved config.
+	if cfg.Alert.Email.Password != "from-file" || len(cfg.Alert.Email.To) != 1 {
+		t.Fatalf("env overrides mutated config: %+v", cfg.Alert.Email)
+	}
+}
+
+func TestEmailAlertDefaultsAndValidation(t *testing.T) {
+	cfg := &Config{Alert: &AlertConfig{Email: &EmailAlertConfig{
+		Enabled: true, SMTPHost: "smtp.example.com", From: "a@example.com", To: []string{"b@example.com"},
+	}}}
+	got, err := cfg.EmailAlert()
+	if err != nil || got.SMTPPort != 587 {
+		t.Fatalf("EmailAlert() = %+v, %v; want port 587", got, err)
+	}
+
+	cfg.Alert.Email.To = nil
+	if _, err := cfg.EmailAlert(); err == nil {
+		t.Fatal("expected error when 'to' is empty")
+	}
+
+	cfg.Alert.Email.Enabled = false
+	if got, err := cfg.EmailAlert(); got != nil || err != nil {
+		t.Fatalf("disabled config: got %+v, %v", got, err)
+	}
+}
+
+func TestEmailAlertEnvOnly(t *testing.T) {
+	t.Setenv("WECLAW_ALERT_ENABLED", "true")
+	t.Setenv("WECLAW_ALERT_SMTP_HOST", "smtp.example.com")
+	t.Setenv("WECLAW_ALERT_SMTP_USERNAME", "bot@example.com")
+	t.Setenv("WECLAW_ALERT_TO", "ops@example.com")
+
+	got, err := DefaultConfig().EmailAlert()
+	if err != nil || got == nil || got.From != "bot@example.com" {
+		t.Fatalf("EmailAlert() = %+v, %v", got, err)
 	}
 }
