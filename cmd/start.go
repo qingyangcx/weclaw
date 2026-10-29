@@ -138,6 +138,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Image save directory: %s", cfg.SaveDir)
 	}
 
+	// Purge saved inbound images older than 90 days, now and every 24h
+	handler.StartImageRetention(ctx)
+
 	// Start default agent initialization in background so monitors can start immediately
 	go func() {
 		if cfg.DefaultAgent == "" {

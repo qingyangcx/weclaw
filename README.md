@@ -104,7 +104,7 @@ WeClaw supports sending images, videos, files, and voice messages to/from WeChat
 
 **Voice messages:** When you send a voice message in WeChat, WeClaw automatically uses WeChat's speech-to-text transcription and forwards the text to the AI agent. Duplicate voice message events are automatically deduplicated.
 
-**Image messages:** When you send an image in WeChat, WeClaw downloads and decrypts it, saves it to `save_dir` (or a temp directory if unset), and forwards it to the agent together with any text (an image alone uses a default prompt). ACP agents that advertise image support receive it as an image content block; other agents get the local file path in the prompt.
+**Image messages:** When you send an image in WeChat, WeClaw downloads and decrypts it, saves it to `save_dir` (or a temp directory if unset), and forwards it to the agent together with any text (an image alone uses a default prompt). ACP agents that advertise image support receive it as an image content block; other agents get the local file path in the prompt. Saved images (and their sidecar files) are deleted automatically after 90 days.
 
 **From agent replies:** When an AI agent returns markdown with images (`![](url)`), WeClaw automatically extracts the image URLs, downloads them, uploads to WeChat CDN (AES-128-ECB encrypted), and sends them as image messages.
 
