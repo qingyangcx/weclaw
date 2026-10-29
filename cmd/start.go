@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/alert"
 	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
@@ -38,7 +40,7 @@ var startCmd = &cobra.Command{
 	RunE:  runStart,
 }
 
-func runStart(cmd *cobra.Command, args []string) error {
+func runStart(cmd *cobra.Command, args []string) (err error) {
 	if !foregroundFlag {
 		// Check if login is needed — if so, do it in foreground first, then daemon
 		accounts, _ := ilink.LoadAllCredentials()
@@ -53,6 +55,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 		return runDaemon()
 	}
+
+	// Alert (if configured) before exiting on panic or fatal error
+	defer alert.CrashOnPanic()
+	defer func() { alert.NotifyFatal(err) }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -78,6 +84,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	setupAlerts(cfg)
 
 	if config.DetectAndConfigure(cfg) {
 		if err := config.Save(cfg); err != nil {
@@ -143,6 +151,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Start default agent initialization in background so monitors can start immediately
 	go func() {
+		defer alert.CrashOnPanic()
 		if cfg.DefaultAgent == "" {
 			log.Println("No default agent configured, staying in echo mode")
 			return
@@ -180,6 +189,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	for _, creds := range accounts {
 		wg.Add(1)
 		go func(c *ilink.Credentials) {
+			defer alert.CrashOnPanic()
 			defer wg.Done()
 			runMonitorWithRestart(ctx, c, handler)
 		}(creds)
@@ -188,6 +198,23 @@ func runStart(cmd *cobra.Command, args []string) error {
 	wg.Wait()
 	log.Println("All monitors stopped")
 	return nil
+}
+
+// setupAlerts enables email alerts if configured. Recent log lines are kept in
+// memory so they can be included in alert emails.
+func setupAlerts(cfg *config.Config) {
+	emailCfg, err := cfg.EmailAlert()
+	if err != nil {
+		log.Printf("[alert] email alerts disabled: %v", err)
+		return
+	}
+	if emailCfg == nil {
+		return
+	}
+	tail := alert.NewLogTail(15)
+	log.SetOutput(io.MultiWriter(os.Stderr, tail))
+	alert.SetDefault(alert.NewNotifier(alert.NewEmailSender(*emailCfg), tail))
+	log.Printf("[alert] email alerts enabled (smtp=%s:%d, to=%v)", emailCfg.SMTPHost, emailCfg.SMTPPort, emailCfg.To)
 }
 
 // runMonitorWithRestart runs a monitor with automatic restart on failure.

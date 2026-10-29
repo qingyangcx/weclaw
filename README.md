@@ -207,6 +207,36 @@ Custom agent CLI environment variables:
 }
 ```
 
+### Error alerts (email)
+
+weclaw can email you when something needs attention. Add an `alert.email` block to `config.json`:
+
+```json
+{
+  "alert": {
+    "email": {
+      "enabled": true,
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "username": "bot@gmail.com",
+      "password_file": "~/.weclaw/smtp_password",
+      "from": "bot@gmail.com",
+      "to": ["you@example.com"]
+    }
+  }
+}
+```
+
+- `smtp_port` defaults to `587` (STARTTLS); use `465` for implicit TLS. `from` defaults to `username`.
+- Keep the password out of `config.json`: put it in a file and point `password_file` at it (e.g. `printf '%s' 'your-app-password' > ~/.weclaw/smtp_password && chmod 600 ~/.weclaw/smtp_password`). The file is read at startup and surrounding whitespace is trimmed. This survives `weclaw restart`, which does not reliably pass env vars to the new process.
+- Password precedence: `WECLAW_ALERT_SMTP_PASSWORD` > `password_file` > `password`.
+- Gmail: use `smtp.gmail.com` port `587` with an [app password](https://myaccount.google.com/apppasswords) (requires 2-Step Verification), not your normal account password.
+- Every field can be overridden by env vars: `WECLAW_ALERT_ENABLED`, `WECLAW_ALERT_SMTP_HOST`, `WECLAW_ALERT_SMTP_PORT`, `WECLAW_ALERT_SMTP_USERNAME`, `WECLAW_ALERT_SMTP_PASSWORD`, `WECLAW_ALERT_SMTP_PASSWORD_FILE`, `WECLAW_ALERT_FROM`, `WECLAW_ALERT_TO` (comma-separated).
+
+Alerts are sent for: agent errors/timeouts (`agent_error`, `agent_timeout`), failed WeChat replies (`reply_failed`), an expired WeChat session that needs `weclaw login` (`session_expired`), repeated long-poll failures (`poll_failing`), and panics or fatal exits of `weclaw start` (`panic`, `fatal`). The subject looks like `[weclaw] agent_error: claude: exit status 1`. The body has the time, account, user, agent, error, and the last few log lines.
+
+Sending runs in the background, so it never blocks message handling. If an email fails to send, weclaw only logs it. Identical alerts are sent at most once per 30 minutes, with a cap of 20 emails per hour. With no `alert.email` config (or `enabled: false`), alerts are off.
+
 ### Permission bypass
 
 By default, some agents require interactive permission approval which doesn't work in WeChat. Add `args` to your agent config to bypass:

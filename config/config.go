@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Config holds the application configuration.
@@ -14,6 +16,24 @@ type Config struct {
 	APIAddr      string                 `json:"api_addr,omitempty"`
 	SaveDir      string                 `json:"save_dir,omitempty"`
 	Agents       map[string]AgentConfig `json:"agents"`
+	Alert        *AlertConfig           `json:"alert,omitempty"`
+}
+
+// AlertConfig configures operator alerts on errors.
+type AlertConfig struct {
+	Email *EmailAlertConfig `json:"email,omitempty"`
+}
+
+// EmailAlertConfig configures email alerts sent via SMTP.
+type EmailAlertConfig struct {
+	Enabled      bool     `json:"enabled"`
+	SMTPHost     string   `json:"smtp_host"`
+	SMTPPort     int      `json:"smtp_port,omitempty"` // default 587; 465 = implicit TLS
+	Username     string   `json:"username,omitempty"`
+	Password     string   `json:"password,omitempty"`      // prefer password_file or WECLAW_ALERT_SMTP_PASSWORD
+	PasswordFile string   `json:"password_file,omitempty"` // read at startup; env password > password_file > password
+	From         string   `json:"from,omitempty"`          // default: username
+	To           []string `json:"to"`
 }
 
 // AgentConfig holds configuration for a single agent.
@@ -119,6 +139,97 @@ func loadEnv(cfg *Config) {
 	if v := os.Getenv("WECLAW_SAVE_DIR"); v != "" {
 		cfg.SaveDir = v
 	}
+}
+
+// EmailAlert returns the effective email alert config (config file merged with
+// WECLAW_ALERT_* env vars), or nil if email alerts are not enabled.
+// Env values are applied to a copy so secrets are never written back by Save.
+func (c *Config) EmailAlert() (*EmailAlertConfig, error) {
+	var e EmailAlertConfig
+	if c.Alert != nil && c.Alert.Email != nil {
+		e = *c.Alert.Email
+		e.To = append([]string(nil), e.To...)
+	}
+	if v := os.Getenv("WECLAW_ALERT_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WECLAW_ALERT_ENABLED %q: %w", v, err)
+		}
+		e.Enabled = enabled
+	}
+	if v := os.Getenv("WECLAW_ALERT_SMTP_HOST"); v != "" {
+		e.SMTPHost = v
+	}
+	if v := os.Getenv("WECLAW_ALERT_SMTP_PORT"); v != "" {
+		port, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WECLAW_ALERT_SMTP_PORT %q: %w", v, err)
+		}
+		e.SMTPPort = port
+	}
+	if v := os.Getenv("WECLAW_ALERT_SMTP_USERNAME"); v != "" {
+		e.Username = v
+	}
+	envPassword := os.Getenv("WECLAW_ALERT_SMTP_PASSWORD")
+	if envPassword != "" {
+		e.Password = envPassword
+	}
+	if v := os.Getenv("WECLAW_ALERT_SMTP_PASSWORD_FILE"); v != "" {
+		e.PasswordFile = v
+	}
+	if v := os.Getenv("WECLAW_ALERT_FROM"); v != "" {
+		e.From = v
+	}
+	if v := os.Getenv("WECLAW_ALERT_TO"); v != "" {
+		e.To = nil
+		for _, addr := range strings.Split(v, ",") {
+			if addr = strings.TrimSpace(addr); addr != "" {
+				e.To = append(e.To, addr)
+			}
+		}
+	}
+
+	if !e.Enabled {
+		return nil, nil
+	}
+	if envPassword == "" && e.PasswordFile != "" {
+		password, err := readPasswordFile(e.PasswordFile)
+		if err != nil {
+			return nil, err
+		}
+		e.Password = password
+	}
+	if e.SMTPPort == 0 {
+		e.SMTPPort = 587
+	}
+	if e.From == "" {
+		e.From = e.Username
+	}
+	if e.SMTPHost == "" || e.From == "" || len(e.To) == 0 {
+		return nil, fmt.Errorf("alert.email requires smtp_host, from (or username) and to")
+	}
+	return &e, nil
+}
+
+// readPasswordFile reads a secret from path (leading "~/" expands to the home
+// directory) and trims surrounding whitespace.
+func readPasswordFile(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand password_file %q: %w", path, err)
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read alert.email password_file: %w", err)
+	}
+	password := strings.TrimSpace(string(data))
+	if password == "" {
+		return "", fmt.Errorf("alert.email password_file %s is empty", path)
+	}
+	return password, nil
 }
 
 // Save saves the configuration to disk.
