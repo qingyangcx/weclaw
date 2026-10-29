@@ -26,13 +26,14 @@ type AlertConfig struct {
 
 // EmailAlertConfig configures email alerts sent via SMTP.
 type EmailAlertConfig struct {
-	Enabled  bool     `json:"enabled"`
-	SMTPHost string   `json:"smtp_host"`
-	SMTPPort int      `json:"smtp_port,omitempty"` // default 587; 465 = implicit TLS
-	Username string   `json:"username,omitempty"`
-	Password string   `json:"password,omitempty"` // prefer WECLAW_ALERT_SMTP_PASSWORD
-	From     string   `json:"from,omitempty"`     // default: username
-	To       []string `json:"to"`
+	Enabled      bool     `json:"enabled"`
+	SMTPHost     string   `json:"smtp_host"`
+	SMTPPort     int      `json:"smtp_port,omitempty"` // default 587; 465 = implicit TLS
+	Username     string   `json:"username,omitempty"`
+	Password     string   `json:"password,omitempty"`      // prefer password_file or WECLAW_ALERT_SMTP_PASSWORD
+	PasswordFile string   `json:"password_file,omitempty"` // read at startup; env password > password_file > password
+	From         string   `json:"from,omitempty"`          // default: username
+	To           []string `json:"to"`
 }
 
 // AgentConfig holds configuration for a single agent.
@@ -169,8 +170,12 @@ func (c *Config) EmailAlert() (*EmailAlertConfig, error) {
 	if v := os.Getenv("WECLAW_ALERT_SMTP_USERNAME"); v != "" {
 		e.Username = v
 	}
-	if v := os.Getenv("WECLAW_ALERT_SMTP_PASSWORD"); v != "" {
-		e.Password = v
+	envPassword := os.Getenv("WECLAW_ALERT_SMTP_PASSWORD")
+	if envPassword != "" {
+		e.Password = envPassword
+	}
+	if v := os.Getenv("WECLAW_ALERT_SMTP_PASSWORD_FILE"); v != "" {
+		e.PasswordFile = v
 	}
 	if v := os.Getenv("WECLAW_ALERT_FROM"); v != "" {
 		e.From = v
@@ -187,6 +192,13 @@ func (c *Config) EmailAlert() (*EmailAlertConfig, error) {
 	if !e.Enabled {
 		return nil, nil
 	}
+	if envPassword == "" && e.PasswordFile != "" {
+		password, err := readPasswordFile(e.PasswordFile)
+		if err != nil {
+			return nil, err
+		}
+		e.Password = password
+	}
 	if e.SMTPPort == 0 {
 		e.SMTPPort = 587
 	}
@@ -197,6 +209,27 @@ func (c *Config) EmailAlert() (*EmailAlertConfig, error) {
 		return nil, fmt.Errorf("alert.email requires smtp_host, from (or username) and to")
 	}
 	return &e, nil
+}
+
+// readPasswordFile reads a secret from path (leading "~/" expands to the home
+// directory) and trims surrounding whitespace.
+func readPasswordFile(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand password_file %q: %w", path, err)
+		}
+		path = filepath.Join(home, path[2:])
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read alert.email password_file: %w", err)
+	}
+	password := strings.TrimSpace(string(data))
+	if password == "" {
+		return "", fmt.Errorf("alert.email password_file %s is empty", path)
+	}
+	return password, nil
 }
 
 // Save saves the configuration to disk.
